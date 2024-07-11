@@ -1,7 +1,8 @@
+from pickle import FALSE
 from googleapiclient.discovery import build
 from oauth2client.service_account import ServiceAccountCredentials
 from google.cloud import bigquery
-from google.cloud.exceptions import NotFound
+from google.api_core.exceptions import NotFound
 import pandas as pd
 import os
 
@@ -16,6 +17,13 @@ BIGQUERY_TABLE = ''  # BigQuery Table name where the data will be stored, if it 
 # Setting up the environment variable for Google Application Credentials
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = KEY_FILE_LOCATION
 
+ua_type_to_conversion = {
+    'INTEGER': int,
+    'TIME': float,
+    'PERCENT': float,
+    'CURRENCY': float,
+}
+
 def initialize_analyticsreporting():
     """Initializes the Google Analytics Reporting API client."""
     credentials = ServiceAccountCredentials.from_json_keyfile_name(
@@ -23,45 +31,45 @@ def initialize_analyticsreporting():
     analytics = build('analyticsreporting', 'v4', credentials=credentials)
     return analytics
 
-def get_report(analytics, page_token=None):
+def get_report(analytics, next_page_token):
     """Fetches the report data from Google Analytics."""
     # Here, specify the analytics report request details
     body = {
         'reportRequests': [
             {
                 'viewId': VIEW_ID,
-                'dateRanges': [{'startDate': '2006-01-01', 'endDate': 'today'}],
+                'dateRanges': [{'startDate': '2023-03-08', 'endDate': '2023-09-08'}],
                 # Metrics and dimensions are specified here
+                  # users
                 'metrics': [
-                    {'expression': 'ga:sessions'},
                     {'expression': 'ga:pageviews'},
-                    {'expression': 'ga:users'},
-                    {'expression': 'ga:newUsers'},
-                    {'expression': 'ga:bounceRate'},
-                    {'expression': 'ga:sessionDuration'},
-                    {'expression': 'ga:avgSessionDuration'},
-                    {'expression': 'ga:pageviewsPerSession'},
-                    # Add or remove metrics as per your requirements
+                    {'expression': 'ga:totalEvents'},
+                    {'expression': 'ga:uniqueEvents'},
+
                 ],
                 'dimensions': [
-                    {'name': 'ga:country'},
-                    {'name': 'ga:pageTitle'},
-                    {'name': 'ga:browser'},
-                    {'name': 'ga:channelGrouping'},
-                    {'name': 'ga:source'},
+                    {'name': 'ga:date'},
                     {'name': 'ga:pagePath'},
-                    {'name': 'ga:deviceCategory'},
-                    {'name': 'ga:date'}, # get the details by year-month-day
+                    #{'name': 'ga:fullReferrer'},
+                    #{'name': 'ga:source'},
+                    #{'name': 'ga:medium'},
+                    #{'name': 'ga:userType'},
+                    #{'name': 'ga:channelGrouping'},
+                    #{'name': 'ga:campaign'}
                     # Add or remove dimensions as per your requirements
                 ],
-                'pageSize': 20000  # Adjust the pageSize as needed
+                'pageSize': 20000,  # Adjust the pageSize as needed
+                "samplingLevel": 'LARGE',
             }
         ]
     }
-    if page_token:
-        body['reportRequests'][0]['pageToken'] = page_token
 
-    return analytics.reports().batchGet(body=body).execute()
+    if next_page_token != '':
+        body['reportRequests'][0]['pageToken'] = next_page_token
+
+    return analytics.reports().batchGet(
+        body=body
+    ).execute()
 
 def response_to_dataframe(response):
     """Converts the API response into a pandas DataFrame."""
@@ -81,8 +89,8 @@ def response_to_dataframe(response):
 
             for values in dateRangeValues:
                 for metricHeader, value in zip(metricHeaders, values.get('values')):
-                    row_data[metricHeader.get('name')] = value
-
+                    conversion_f = ua_type_to_conversion.get(metricHeader.get('type'), str)
+                    row_data[metricHeader.get('name')] = conversion_f(value)
             list_rows.append(row_data)
 
     return pd.DataFrame(list_rows)
@@ -128,18 +136,16 @@ def upload_to_bigquery(df, project_id, dataset_id, table_id):
 def main():
     """Main function to execute the script."""
     try:
-        page_token = None
-        while True:
-            # Fetching the report data from Google Analytics
-            analytics = initialize_analyticsreporting()
-            response = get_report(analytics, page_token)
+        analytics = initialize_analyticsreporting()
+        next_page_token = ''
+        while 1 == 1:
+            response = get_report(analytics, next_page_token)
             df = response_to_dataframe(response)
             upload_to_bigquery(df, BIGQUERY_PROJECT, BIGQUERY_DATASET, BIGQUERY_TABLE)
-            page_token = response.get('reports', [])[0].get('nextPageToken')
-            if not page_token:
+            next_page_token = response.get('reports', [])[0].get('nextPageToken', '')
+            if next_page_token == '':
                 break
-            print(f"Fetching next page of results...{page_token}")
-        
+            # Allow to run one time after next page is empty to get the last batch
     except Exception as e:
         # Handling exceptions and printing error messages
         print(f"Error occurred: {e}")
